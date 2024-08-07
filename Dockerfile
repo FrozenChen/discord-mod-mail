@@ -1,4 +1,4 @@
-FROM python:3.9-slim
+FROM python:3.11-slim
 
 ARG BRANCH="unknown"
 ARG COMMIT="unknown"
@@ -29,9 +29,9 @@ USER modmail
 COPY LICENSE.md LICENSE.md
 COPY README.md README.md
 COPY schema.sql schema.sql
-COPY run.py run.py
+COPY main.py main.py
 
 ENV COMMIT_BRANCH=${BRANCH}
 ENV COMMIT_SHA=${COMMIT}
 
-CMD ["python3", "run.py"]
+CMD ["python3", "main.py"]

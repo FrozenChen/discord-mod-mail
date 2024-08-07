@@ -1,1 +1,2 @@
-disnake>=2.8
+discord.py==2.4.0
+asqlite==2.0.0
