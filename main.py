@@ -18,10 +18,10 @@ import discord
 
 if TYPE_CHECKING:
     from typing import Optional
-    from discord import Member, User
+    from discord import Member, User, Message
     from datetime import datetime
 
-version = "2.0.0"
+version = "2.1.0"
 SIZE_LIMIT = 0x800000
 SIZE_DIFF = 0x800
 
@@ -57,8 +57,6 @@ else:
     except FileNotFoundError as e:
         print("git not found, not showing branch")
         branch = "<unknown>"
-
-print(f"Starting discord-mod-mail {version}!")
 
 config = configparser.ConfigParser()
 config.read(join(data_dir, "config.ini"))
@@ -97,18 +95,18 @@ class ModMail(discord.Client):
             await self.close()
             return
         self.channel = channel
-        print("{0.user} is now ready.".format(client))
         startup_message = (
             f"{self.user} is now ready. Version {version}, branch {branch}, commit {commit[0:7]}, "
             f"Python {pyver}"
         )
+        print(startup_message)
         if post_startup_message:
             await self.channel.send(startup_message)
-        print(startup_message)
         self.already_ready = True
 
     async def on_message(self, message: discord.Message):
         author = message.author
+        cached_message: Optional[Message] = None
         if message.author.bot:
             return
         if not self.already_ready:
@@ -138,24 +136,37 @@ class ModMail(discord.Client):
                     author = member
                 break
 
-            embed = discord.Embed(
-                color=gen_color(author.id), description=message.content
-            )
+            embed = discord.Embed()
+            if message.message_snapshots:
+                og_message = message.message_snapshots[0]
+                cached_message = og_message.cached_message
+                embed.description = f"(Forwarded message)\n{og_message.content}"
+                if cached_message:
+                    embed.set_footer(text=f"Originally send by {cached_message.author} in #{cached_message.channel}.")
+                else:
+                    embed.set_footer(text="Unable to obtain original message.")
+            else:
+                og_message = message
+                embed.description = og_message.content
+
             if isinstance(author, discord.Member) and author.nick:
                 author_name = f"{author.nick} ({author})"
             else:
                 author_name = str(author)
             embed.set_author(
                 name=author_name,
+                url=cached_message.jump_url if cached_message else None,
                 icon_url=author.avatar.url
                 if author.avatar
                 else author.default_avatar.url,
             )
 
+            embed.colour = gen_color(message.author.id)
+
             to_send = f"{author.id}"
-            if message.attachments:
+            if og_message.attachments:
                 attachment_urls = []
-                for attachment in message.attachments:
+                for attachment in og_message.attachments:
                     attachment_urls.append(
                         f"[{attachment.filename}]({attachment.url}) "
                         f"({attachment.size} bytes)"
