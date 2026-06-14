@@ -1,13 +1,13 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 ARG BRANCH="unknown"
 ARG COMMIT="unknown"
 
 LABEL org.opencontainers.image.title discord-mod-mail
 LABEL org.opencontainers.image.description Simple mod-mail system for Discord
-LABEL org.opencontainers.image.source https://github.com/ihaveamac/discord-mod-mail
-LABEL org.opencontainers.image.url https://github.com/ihaveamac/discord-mod-mail
-LABEL org.opencontainers.image.documentation https://github.com/ihaveamac/discord-mod-mail
+LABEL org.opencontainers.image.source https://github.com/FrozenChen/discord-mod-mail
+LABEL org.opencontainers.image.url https://github.com/FrozenChen/discord-mod-mail
+LABEL org.opencontainers.image.documentation https://github.com/FrozenChen/discord-mod-mail
 LABEL org.opencontainers.image.licenses MIT
 LABEL org.opencontainers.image.revision $COMMIT
 
@@ -30,6 +30,7 @@ COPY LICENSE.md LICENSE.md
 COPY README.md README.md
 COPY schema.sql schema.sql
 COPY main.py main.py
+COPY utils.py utils.py
 
 ENV COMMIT_BRANCH=${BRANCH}
 ENV COMMIT_SHA=${COMMIT}
