@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 
 from __future__ import annotations
+
 import asyncio
 import configparser
-import random
-from io import BytesIO
-
-import asqlite
+import io
 import sqlite3
 from os import environ
 from os.path import join
+from pathlib import Path
 from subprocess import check_output, CalledProcessError
 from sys import version_info
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
+import asqlite
 import discord
+from discord.ext import commands
+
+from utils import MailCog, gen_color
 
 if TYPE_CHECKING:
-    from typing import Optional
-    from discord import Member, User, Message
+    from discord import Member, User
     from datetime import datetime
+    from configparser import ConfigParser
 
-version = "2.1.0"
-SIZE_LIMIT = 0x800000
-SIZE_DIFF = 0x800
+version = "3.0.0"
 
 is_docker = environ.get("IS_DOCKER", 0)
 data_dir = environ.get("MODMAIL_DATA_DIR", ".")
@@ -43,7 +44,7 @@ else:
     except CalledProcessError as e:
         print(f"Checking for git commit failed: {type(e).__name__} {e}")
         commit = "<unknown>"
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         print("git not found, not showing commit")
         commit = "<unknown>"
 
@@ -54,26 +55,43 @@ else:
     except CalledProcessError as e:
         print(f"Checking for git branch failed: {type(e).__name__} {e}")
         branch = "<unknown>"
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         print("git not found, not showing branch")
         branch = "<unknown>"
 
+if not Path(join(data_dir, "config.ini")).is_file():
+    print("Missing config file")
+    exit(-1)
 config = configparser.ConfigParser()
 config.read(join(data_dir, "config.ini"))
 
 
-class ModMail(discord.Client):
+class ModMail(commands.Bot):
     pool: asqlite.Pool
     prefix: str
+    config: ConfigParser
     channel: discord.TextChannel
-    config: configparser.ConfigParser
     already_ready: bool
-    last_id: Optional[int]
+    last_sender: Optional[discord.Member]
+    command_mention: dict[str, str] = {}
+
+    def __init__(
+        self, max_messages: int, activity: discord.Activity, intents: discord.Intents
+    ):
+        super().__init__(
+            [], max_messages=max_messages, activity=activity, intents=intents
+        )
+        self.config = config
+
+    async def setup_tree(self):
+        await self.add_cog(MailCog())
+        synced_commands = await self.tree.sync()
+        for command in synced_commands:
+            self.command_mention[command.name] = f"</{command.name}:{command.id}>"
 
     async def setup_hook(self):
         self.already_ready = False
-        self.last_id = None
-        self.prefix = config["Main"]["command_prefix"]
+        self.last_sender = None
         self.pool = await asqlite.create_pool(database_file)
         async with self.pool.acquire() as conn:
             if (await conn.fetchone("PRAGMA user_version"))[0] == 0:
@@ -82,6 +100,7 @@ class ModMail(discord.Client):
                 await conn.execute("PRAGMA user_version = 1")
                 with open("schema.sql", "r", encoding="utf-8") as f:
                     await conn.executescript(f.read())
+        await self.setup_tree()
 
     async def on_ready(self):
         if self.already_ready:
@@ -90,7 +109,7 @@ class ModMail(discord.Client):
             "post_startup_message", fallback=True
         )
         channel = self.get_channel(int(config["Main"]["channel_id"]))
-        if not channel or type(channel) is not discord.TextChannel:
+        if not channel or not isinstance(channel, discord.TextChannel):
             print(f'Channel with ID {config["Main"]["channel_id"]} not found.')
             await self.close()
             return
@@ -104,69 +123,55 @@ class ModMail(discord.Client):
             await self.channel.send(startup_message)
         self.already_ready = True
 
-    async def on_message(self, message: discord.Message):
-        author = message.author
-        cached_message: Optional[Message] = None
-        if message.author.bot:
+    async def handle_member_message(
+        self,
+        user: discord.User | discord.Member,
+        message: str,
+        files: list[discord.Attachment],
+    ) -> None:
+
+        if user.id not in anti_spam_check:
+            anti_spam_check[user.id] = 0
+
+        anti_spam_check[user.id] += 1
+        if anti_spam_check[user.id] >= int(config["AntiSpam"]["messages"]):
+            await self.add_ignore(user.id, "Automatic anti-spam ignore")
+            await self.channel.send(
+                f"{user.id} {user.mention} auto-ignored due to spam. "
+                f'Use `{config["Main"]["command_prefix"]}unignore` to reverse.'
+            )
+            anti_spam_check[user.id] = 0
             return
-        if not self.already_ready:
-            return
-
-        if type(message.channel) is discord.DMChannel:
-            if await self.is_ignored(author.id):
-                return
-
-            if author.id not in anti_spam_check:
-                anti_spam_check[author.id] = 0
-
-            anti_spam_check[author.id] += 1
-            if anti_spam_check[author.id] >= int(config["AntiSpam"]["messages"]):
-                await self.add_ignore(author.id, "Automatic anti-spam ignore")
-                await self.channel.send(
-                    f"{author.id} {author.mention} auto-ignored due to spam. "
-                    f'Use `{config["Main"]["command_prefix"]}unignore` to reverse.'
-                )
-                anti_spam_check[author.id] = 0
-                return
-
-            # for the purpose of nicknames, if anys
-            for server in self.guilds:
-                member = server.get_member(author.id)
-                if member:
-                    author = member
-                break
+        try:
+            if isinstance(user, discord.User):
+                try:
+                    member = await self.channel.guild.fetch_member(user.id)
+                except discord.NotFound:
+                    member = user
+            else:
+                member = user
 
             embed = discord.Embed()
-            if message.message_snapshots:
-                og_message = message.message_snapshots[0]
-                cached_message = og_message.cached_message
-                embed.description = f"(Forwarded message)\n{og_message.content}"
-                if cached_message:
-                    embed.set_footer(text=f"Originally send by {cached_message.author} in #{cached_message.channel}.")
-                else:
-                    embed.set_footer(text="Unable to obtain original message.")
-            else:
-                og_message = message
-                embed.description = og_message.content
+            embed.description = message
 
-            if isinstance(author, discord.Member) and author.nick:
-                author_name = f"{author.nick} ({author})"
+            if isinstance(member, discord.Member) and member.nick:
+                author_name = f"{member.nick} ({member})"
             else:
-                author_name = str(author)
+                author_name = str(member)
+
             embed.set_author(
                 name=author_name,
-                url=cached_message.jump_url if cached_message else None,
-                icon_url=author.avatar.url
-                if author.avatar
-                else author.default_avatar.url,
+                icon_url=(
+                    member.avatar.url if member.avatar else member.default_avatar.url
+                ),
             )
 
-            embed.colour = gen_color(message.author.id)
+            embed.colour = gen_color(user.id)
 
-            to_send = f"{author.id}"
-            if og_message.attachments:
+            to_send = f"{user.id}"
+            if files:
                 attachment_urls = []
-                for attachment in og_message.attachments:
+                for attachment in files:
                     attachment_urls.append(
                         f"[{attachment.filename}]({attachment.url}) "
                         f"({attachment.size} bytes)"
@@ -174,156 +179,59 @@ class ModMail(discord.Client):
                 attachment_msg = "\N{BULLET} " + "\n\N{BULLET} ".join(attachment_urls)
                 embed.add_field(name="Attachments", value=attachment_msg, inline=False)
             await self.channel.send(to_send, embed=embed)
-            await message.add_reaction("\N{WHITE HEAVY CHECK MARK}")
-            self.last_id = author.id
+            self.last_sender = member  # pyright: ignore[reportAttributeAccessIssue]
+        finally:
             await asyncio.sleep(int(config["AntiSpam"]["seconds"]))
-            anti_spam_check[author.id] -= 1
+            anti_spam_check[user.id] -= 1
 
-        elif message.channel == self.channel:
-            if not message.content.startswith(self.prefix):
-                return
-            args = list(message.content[len(self.prefix) :].split(maxsplit=1))
-
-            # #Nothing after the prefix
-            if not args:
-                return
-            if args[0].isdigit():
-                args[0] = int(args[0])  # type: ignore
-            match args:
-                case ["ignore" | "qignore" | "unignore"]:
-                    await self.channel.send("Did you forget to enter an ID?")
-                case ["ignore", params]:
-                    user_id_str, *reason = params.split(maxsplit=1)
-                    await self.handle_ignore(
-                        message, user_id_str, reason[0] if reason else None
-                    )
-                case ["qignore", params]:
-                    user_id_str, *reason = params.split(maxsplit=1)
-                    await self.handle_ignore(
-                        message, user_id_str, reason[0] if reason else None, quiet=True
-                    )
-                case ["unignore", params]:
-                    user_id_str, *_ = params.split(maxsplit=1)
-                    await self.handle_unignore(message, user_id_str)
-                case [int(user_id), *message_content]:
-                    if not (message_content or message.attachments):
-                        await self.channel.send("Did you forget to enter a message?")
-                        return
-                    await self.handle_staff_reply(
-                        message, user_id, message_content[0] if message_content else ""
-                    )
-                case ["r", *message_content]:
-                    if self.last_id:
-                        if not (message_content or message.attachments):
-                            await self.channel.send(
-                                "Did you forget to enter a message?"
-                            )
-                            return
-                        await self.handle_staff_reply(
-                            message,
-                            self.last_id,
-                            message_content[0] if message_content else "",
-                        )
-                    else:
-                        await self.channel.send(
-                            "There is no last message in the current session."
-                        )
-                        return
-                case ["m", *_]:
-                    if self.last_id:
-                        await self.channel.send(f"{self.last_id} <@!{self.last_id}>")
-                    else:
-                        await self.channel.send(
-                            "There is no last message in the current session."
-                        )
-                        return
-                case ["fixgame", *_]:
-                    await self.change_presence(activity=None)
-                    await self.change_presence(
-                        activity=discord.Game(name=config["Main"]["playing"])
-                    )
-                    await self.channel.send("Game presence re-set.")
-            await asyncio.sleep(2)
-            anti_duplicate_replies[args[0]] = False
-
-    async def handle_ignore(
+    async def handle_staff_message(
         self,
-        message: discord.Message,
-        user_id_str: str,
-        reason: Optional[str],
-        *,
-        quiet=False,
+        interaction: discord.Interaction[ModMail],
+        member: discord.User | discord.Member,
+        author: discord.User | discord.Member,
+        message: str,
+        attachments: list[discord.Attachment],
     ):
-        assert message.guild is not None
+        embed = discord.Embed(color=gen_color(member.id), description=message)
+        if config["Main"].getboolean("anonymous_staff"):
+            to_send = "Staff reply: "
+        else:
+            to_send = f"{author.mention}: "
+        to_send += message
+
+        files = []
+        if attachments:
+            for file in attachments:
+                data = io.BytesIO(await file.read())
+                files.append(discord.File(filename=file.filename, fp=data))
+
         try:
-            user_id = int(user_id_str)
-        except ValueError:
-            await self.channel.send("Could not convert to int.")
+            staff_msg = await member.send(to_send, files=files)
+        except discord.Forbidden:
+            await interaction.followup.send(
+                f"{author.mention} {member.mention} has disabled DMs", ephemeral=True
+            )
             return
 
-        member = message.guild.get_member(user_id)
+        header_message = f"{author.mention} replying to {member.id} {member.mention}"
+        if await self.is_ignored(member.id):
+            header_message += " (replies ignored)"
 
-        if await self.add_ignore(user_id, reason, quiet):
-            if not quiet:
-                to_send = "Your messages are being ignored by staff."
-                if reason:
-                    to_send += " Reason: " + reason
+        # add attachment links to mod-mail message
+        if staff_msg.attachments:
+            attachment_urls = []
+            for attachment in staff_msg.attachments:
+                attachment_urls.append(
+                    f"[{attachment.filename}]({attachment.url}) "
+                    f"({attachment.size} bytes)"
+                )
+            attachment_msg = "\N{BULLET} " + "\n\N{BULLET} ".join(attachment_urls)
+            embed.add_field(name="Attachments", value=attachment_msg, inline=False)
 
-                if member:
-                    try:
-                        await member.send(to_send)
-                    except discord.errors.Forbidden:
-                        await self.channel.send(
-                            f"{member.mention} has disabled DMs or is not in a "
-                            f"shared server, not sending reason."
-                        )
-                else:
-                    await self.channel.send(
-                        "Failed to find user with ID, not sending reason."
-                    )
-            await self.channel.send(
-                f"{message.author.mention} {user_id} is now ignored. Messages from this user will not appear. "
-                f"Use `{self.prefix}unignore` to reverse."
-            )
-        else:
-            await self.channel.send(
-                f"{message.author.mention} {user_id} is already ignored."
-            )
-
-    async def handle_unignore(self, message, user_id_str):
-        try:
-            user_id = int(user_id_str)
-            member = message.guild.get_member(user_id)
-        except ValueError:
-            await self.channel.send("Could not convert to int.")
-            return
-
-        ignored = await self.is_ignored(user_id)
-        if ignored:
-            is_quiet = ignored[0]
-            if not is_quiet:
-                to_send = "Your messages are no longer being ignored by staff."
-                if member:
-                    try:
-                        await member.send(to_send)
-                    except discord.errors.Forbidden:
-                        await self.channel.send(
-                            f"{member.mention} has disabled DMs or is not in "
-                            f"a shared server, not sending notification."
-                        )
-                else:
-                    await self.channel.send(
-                        "Failed to find user with ID, not sending notification."
-                    )
-        if await self.remove_ignore(user_id):
-            await self.channel.send(
-                f"{message.author.mention} {user_id} is no longer ignored. Messages from this user will appear "
-                f"again. Use `{self.prefix}ignore` to reverse."
-            )
-        else:
-            await self.channel.send(
-                f"{message.author.mention} {user_id} is not ignored."
-            )
+        await self.channel.send(header_message, embed=embed)
+        await interaction.followup.send(
+            f"Successfully messaged {member}!", ephemeral=True
+        )
 
     async def on_typing(
         self,
@@ -363,135 +271,14 @@ class ModMail(discord.Client):
             )
             return res.get_cursor().rowcount
 
-    async def handle_staff_reply(
-        self, message: discord.Message, user_id: int, message_content: str = ""
-    ):
-        assert message.guild is not None
-        member = message.guild.get_member(user_id)
-        if not member:
-            return await self.channel.send("Failed to find member.")
-        if member.bot:
-            return await self.channel.send("You can't send messages to bots.")
-        author = message.author
-        embed = discord.Embed(color=gen_color(user_id), description=message_content)
-        if config["Main"].getboolean("anonymous_staff"):
-            to_send = "Staff reply: "
-        else:
-            to_send = f"{author.mention}: "
-        to_send += message_content
-
-        try:
-            attachments, progress_msg = await self.handle_attachments(message)
-        except ValueError:
-            return
-
-        if progress_msg:
-            await progress_msg.edit(
-                content=f"Sending message with {len(attachments)} " f"attachments..."
-            )
-        try:
-            staff_msg = await member.send(to_send, files=attachments)
-        except discord.Forbidden:
-            return await self.channel.send(
-                f"{author.mention} {member.mention} has disabled DMs"
-            )
-        header_message = f"{author.mention} replying to {member.id} {member.mention}"
-        if await self.is_ignored(member.id):
-            header_message += " (replies ignored)"
-
-        # add attachment links to mod-mail message
-        if staff_msg.attachments:
-            attachment_urls = []
-            for attachment in staff_msg.attachments:
-                attachment_urls.append(
-                    f"[{attachment.filename}]({attachment.url}) "
-                    f"({attachment.size} bytes)"
-                )
-            attachment_msg = "\N{BULLET} " + "\n\N{BULLET} ".join(attachment_urls)
-            embed.add_field(name="Attachments", value=attachment_msg, inline=False)
-
-        await self.channel.send(header_message, embed=embed)
-        if progress_msg:
-            await progress_msg.delete()
-        await message.delete()
-
-    async def handle_attachments(
-        self, message: discord.Message
-    ) -> tuple[list[discord.File], Optional[discord.Message]]:
-        attachments = []
-        if not message.attachments:
-            return attachments, None
-        # first check the size of all attachments
-        # the 0x800 number is arbitrary, just in case
-        # in reality, the file size needs to be like 0x200 smaller than the supposed limit
-        error_messages = []
-        warning_messages = []
-        for a in message.attachments:
-            if a.size > SIZE_LIMIT:
-                error_messages.append(
-                    f"`{discord.utils.escape_markdown(a.filename)}` "
-                    f"is too large to send in a direct message."
-                )
-            elif a.size > SIZE_LIMIT - 0x1000:
-                warning_messages.append(
-                    f"`{discord.utils.escape_markdown(a.filename)}` "
-                    f"is very close to the file size limit of the "
-                    f"destination. It may fail to send."
-                )
-
-        if error_messages:
-            final = "\n".join(error_messages)
-            final += (
-                f"\nLimit: {SIZE_LIMIT} bytes ({SIZE_LIMIT / (1024 * 1024):.02f} MiB)"
-            )
-            final += (
-                f"\nRecommended Maximum: {SIZE_LIMIT - SIZE_DIFF} bytes "
-                f"({(SIZE_LIMIT - SIZE_DIFF) / (1024 * 1024):.02f} MiB)"
-            )
-            await message.channel.send(final)
-            raise ValueError
-
-        if warning_messages:
-            final = "\n".join(warning_messages)
-            final += (
-                f"\nLimit: {SIZE_LIMIT} bytes ({SIZE_LIMIT / (1024 * 1024):.02f} MiB)"
-            )
-            final += (
-                f"\nRecommended Maximum: {SIZE_LIMIT - SIZE_DIFF} bytes "
-                f"({(SIZE_LIMIT - SIZE_DIFF) / (1024 * 1024):.02f} MiB)"
-            )
-            await message.channel.send(final)
-
-        count = len(message.attachments)
-        progress_msg = await self.channel.send(f"Downloading attachments... 0/{count}")
-        for idx, a in enumerate(message.attachments, 1):
-            buffer = BytesIO()
-            await a.save(buffer, seek_begin=True)
-            attachments.append(discord.File(buffer, a.filename))
-            await progress_msg.edit(content=f"Downloading attachments... {idx}/{count}")
-        return attachments, progress_msg
-
-
-def gen_color(user_id: int):
-    random.seed(user_id)
-    c_r = random.randint(0, 255)
-    c_g = random.randint(0, 255)
-    c_b = random.randint(0, 255)
-    return discord.Color((c_r << 16) + (c_g << 8) + c_b)
-
 
 anti_spam_check = {}
 
-anti_duplicate_replies = {}
-
 if __name__ == "__main__":
     print(f"Starting discord-mod-mail {version}!")
-    intents = discord.Intents(
-        guilds=True, members=True, messages=True, message_content=True, dm_typing=True
-    )
     client = ModMail(
         max_messages=100,
         activity=discord.Activity(name=config["Main"]["playing"]),
-        intents=intents,
+        intents=discord.Intents(guilds=True, dm_typing=True),
     )
     client.run(config["Main"]["token"])
