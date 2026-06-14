@@ -89,6 +89,7 @@ class MailCog(commands.Cog):
             return
         await interaction.response.send_modal(MessageModMailModal())
 
+    @app_commands.guild_only()
     @app_commands.command(name="message_user")
     async def message_user(
         self,
@@ -125,6 +126,7 @@ class MailCog(commands.Cog):
             interaction, member, interaction.user, message, [file] if file else []
         )
 
+    @app_commands.guild_only()
     @app_commands.command(name="message_user_ui")
     async def message_user_modal(
         self,
@@ -153,6 +155,7 @@ class MailCog(commands.Cog):
             return
         await interaction.response.send_modal(MessageUserModal(member))
 
+    @app_commands.guild_only()
     @app_commands.command()
     async def ignore_user(
         self,
@@ -194,6 +197,7 @@ class MailCog(commands.Cog):
                 ephemeral=True,
             )
 
+    @app_commands.guild_only()
     @app_commands.command()
     async def unignore_user(
         self, interaction: discord.Interaction["ModMail"], member: discord.Member
@@ -229,6 +233,7 @@ class MailCog(commands.Cog):
                 f"{member.mention} {member} is not ignored.", ephemeral=True
             )
 
+    @app_commands.guild_only()
     @app_commands.command()
     async def mention_last_user(self, interaction: discord.Interaction["ModMail"]):
         """Mentions the last user"""
@@ -242,6 +247,7 @@ class MailCog(commands.Cog):
                 "There is no last message in the current session.", ephemeral=True
             )
 
+    @app_commands.guild_only()
     @app_commands.command()
     async def fix_game(self, interaction: discord.Interaction["ModMail"]):
         """Attempts to fix the bot activity"""
