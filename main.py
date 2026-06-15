@@ -123,6 +123,9 @@ class ModMail(commands.Bot):
             await self.channel.send(startup_message)
         self.already_ready = True
 
+    def get_command_mention(self, command_name: str) -> str:
+        return self.command_mention.get(command_name, f"/{command_name}")
+
     async def handle_member_message(
         self,
         user: discord.User | discord.Member,
@@ -138,7 +141,7 @@ class ModMail(commands.Bot):
             await self.add_ignore(user.id, "Automatic anti-spam ignore")
             await self.channel.send(
                 f"{user.id} {user.mention} auto-ignored due to spam. "
-                f'Use `{config["Main"]["command_prefix"]}unignore` to reverse.'
+                f"Use {self.get_command_mention('unignore_user')} to reverse."
             )
             anti_spam_check[user.id] = 0
             return
@@ -179,6 +182,88 @@ class ModMail(commands.Bot):
                 attachment_msg = "\N{BULLET} " + "\n\N{BULLET} ".join(attachment_urls)
                 embed.add_field(name="Attachments", value=attachment_msg, inline=False)
             await self.channel.send(to_send, embed=embed)
+            self.last_sender = member  # pyright: ignore[reportAttributeAccessIssue]
+        finally:
+            await asyncio.sleep(int(config["AntiSpam"]["seconds"]))
+            anti_spam_check[user.id] -= 1
+
+    async def handle_member_dm(
+        self,
+        message: discord.Message,
+    ) -> None:
+
+        user = message.author
+
+        if user.id not in anti_spam_check:
+            anti_spam_check[user.id] = 0
+
+        anti_spam_check[user.id] += 1
+        if anti_spam_check[user.id] >= int(config["AntiSpam"]["messages"]):
+            await self.add_ignore(user.id, "Automatic anti-spam ignore")
+            await self.channel.send(
+                f"{user.id} {user.mention} auto-ignored due to spam. "
+                f"Use {self.get_command_mention('unignore_user')} to reverse."
+            )
+            anti_spam_check[user.id] = 0
+            return
+        try:
+            if isinstance(user, discord.User):
+                try:
+                    member = await self.channel.guild.fetch_member(user.id)
+                except discord.NotFound:
+                    member = user
+            else:
+                member = user
+
+            embed = discord.Embed()
+
+            cached_message: Optional[discord.Message] = None
+
+            if message.message_snapshots:
+                og_message = message.message_snapshots[0]
+                # cached_message = og_message.cached_message
+                embed.description = f"(Forwarded message)\n{og_message.content}"
+                # if cached_message:
+                #     embed.set_footer(
+                #     text=f"Originally sent by {cached_message.author} in #{cached_message.channel}."
+                #     )
+                # else:
+                #     embed.set_footer(text="Unable to obtain original message.")
+                embed.set_footer(text="Original message is unavailable.")
+            else:
+                og_message = message
+                embed.description = og_message.content or "No text content"
+
+            if isinstance(member, discord.Member) and member.nick:
+                author_name = f"{member.nick} ({member})"
+            else:
+                author_name = str(member)
+
+            embed.colour = gen_color(message.author.id)
+
+            to_send = f"{member.id}"
+            if og_message.attachments:
+                attachment_urls = []
+                for attachment in og_message.attachments:
+                    attachment_urls.append(
+                        f"[{attachment.filename}]({attachment.url}) "
+                        f"({attachment.size} bytes)"
+                    )
+                attachment_msg = "\N{BULLET} " + "\n\N{BULLET} ".join(attachment_urls)
+                embed.add_field(name="Attachments", value=attachment_msg, inline=False)
+
+            embed.set_author(
+                name=author_name,
+                url=cached_message.jump_url if cached_message else None,
+                icon_url=(
+                    member.avatar.url if member.avatar else member.default_avatar.url
+                ),
+            )
+            await self.channel.send(to_send, embed=embed)
+            try:
+                await message.add_reaction("\N{WHITE HEAVY CHECK MARK}")
+            except (discord.Forbidden, discord.HTTPException):
+                pass
             self.last_sender = member  # pyright: ignore[reportAttributeAccessIssue]
         finally:
             await asyncio.sleep(int(config["AntiSpam"]["seconds"]))
@@ -271,6 +356,19 @@ class ModMail(commands.Bot):
             )
             return res.get_cursor().rowcount
 
+    async def on_message(self, message: discord.Message):
+
+        if (
+            not isinstance(message.channel, discord.DMChannel)
+            or message.author.bot
+            or not self.already_ready
+        ):
+            return
+
+        if await self.is_ignored(message.author.id):
+            return
+        await self.handle_member_dm(message)
+
 
 anti_spam_check = {}
 
@@ -279,6 +377,6 @@ if __name__ == "__main__":
     client = ModMail(
         max_messages=100,
         activity=discord.Activity(name=config["Main"]["playing"]),
-        intents=discord.Intents(guilds=True, dm_typing=True),
+        intents=discord.Intents(guilds=True, dm_typing=True, dm_messages=True),
     )
     client.run(config["Main"]["token"])

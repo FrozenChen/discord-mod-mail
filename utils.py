@@ -83,7 +83,7 @@ class MailCog(commands.Cog):
         """Message staff via ModMail"""
         if await interaction.client.is_ignored(interaction.user.id):
             await interaction.response.send_message(
-                f"You cannot use {interaction.client.command_mention[self.message_modmail.name]} as you have been ignored",
+                f"You cannot use {interaction.client.get_command_mention('message_modmail')} as you have been ignored",
                 ephemeral=True,
             )
             return
@@ -101,7 +101,7 @@ class MailCog(commands.Cog):
         """Message user via ModMail. Limited to only 1 file.
 
         Args:
-            member: User to message. If missing, messages the last member that sent a message via modmail.
+            member: User to message. If missing, message the last member that sent a message via modmail.
             message: Message to send
             file: Optional file to send to the user.
         """
@@ -136,7 +136,7 @@ class MailCog(commands.Cog):
         """Message user via ModMail. Limited to only 1 file.
 
         Args:
-            member: User to message. If missing, messages last member that sent a message via modmail.
+            member: User to message. If missing, message the last member that sent a message via modmail.
 
         """
         if member is None:
@@ -188,8 +188,8 @@ class MailCog(commands.Cog):
                 "Ignored user successfully", ephemeral=True
             )
             await interaction.client.channel.send(
-                f"{interaction.user} added {member.mention} {member} to the ignore list. This user won't be able to use {interaction.client.command_mention[self.message_modmail.name]}. "
-                f"Use {interaction.client.command_mention[self.unignore_user.name]} to reverse.{" (Bot failed to notify member of this action)" if dm_failed else ""}"
+                f"{interaction.user} added {member.mention} {member} to the ignore list. This user won't be able to use {interaction.client.get_command_mention('message_modmail')}. "
+                f"Use {interaction.client.get_command_mention('unignore_user')} to reverse.{" (Bot failed to notify member of this action)" if dm_failed else ""}"
             )
         else:
             await interaction.response.send_message(
@@ -225,8 +225,8 @@ class MailCog(commands.Cog):
                 "Unignored user successfully", ephemeral=True
             )
             await interaction.client.channel.send(
-                f"{interaction.user} removed {member.mention} {member} from the ignore list. This user will now be able to use {interaction.client.command_mention[self.message_modmail.name]} again. "
-                f"Use {interaction.client.command_mention[self.ignore_user.name]} to reverse.{" (Bot failed to notify member of this action)" if dm_failed else ""}"
+                f"{interaction.user} removed {member.mention} {member} from the ignore list. This user will now be able to use {interaction.client.get_command_mention('message_modmail')} again. "
+                f"Use {interaction.client.get_command_mention('ignore_user')}.{" (Bot failed to notify member of this action)" if dm_failed else ""}"
             )
         else:
             await interaction.response.send_message(
