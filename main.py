@@ -261,7 +261,7 @@ class ModMail(commands.Bot):
             )
             await self.channel.send(to_send, embed=embed)
             try:
-                await message.add_reaction("\N{WHITE HEAVY CHECK MARK}")
+                await message.add_reaction("\N{INCOMING ENVELOPE}")
             except (discord.Forbidden, discord.HTTPException):
                 pass
             self.last_sender = member  # pyright: ignore[reportAttributeAccessIssue]
